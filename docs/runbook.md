@@ -15,15 +15,11 @@ export KUBECONFIG="$HOME/.kube/config"
 **Required Directories** (create before starting components):
 ```bash
 mkdir -p $KUBEBUILDER_DIR/bin
-mkdir -p /etc/cni/net.d
-mkdir -p /var/lib/kubelet
-mkdir -p /var/lib/kubelet/pki
-mkdir -p /etc/kubernetes/manifests
-mkdir -p /var/log/kubernetes
-mkdir -p /etc/containerd/
-mkdir -p /run/containerd
-mkdir -p /opt/cni
-mkdir -p /opt/cni/bin
+
+# Try system directories first, fall back to local if permission denied
+mkdir -p /etc/cni/net.d /var/lib/kubelet /var/lib/kubelet/pki /etc/kubernetes/manifests /var/log/kubernetes /etc/containerd /run/containerd /opt/cni/bin 2>/dev/null || {
+    mkdir -p ./etc/cni/net.d ./var/lib/kubelet ./var/lib/kubelet/pki ./etc/kubernetes/manifests ./var/log/kubernetes ./etc/containerd ./run/containerd ./opt/cni/bin
+}
 ```
 
 ## 1. Download Core Components
@@ -93,8 +89,9 @@ echo "${TOKEN},admin,admin,system:masters" > /tmp/token.csv
 ```bash
 openssl genrsa -out /tmp/ca.key 2048
 openssl req -x509 -new -nodes -key /tmp/ca.key -subj "/CN=kubelet-ca" -days 365 -out /tmp/ca.crt
-cp /tmp/ca.crt /var/lib/kubelet/ca.crt
-cp /tmp/ca.crt /var/lib/kubelet/pki/ca.crt
+# Copy to system location or local if permission denied
+cp /tmp/ca.crt /var/lib/kubelet/ca.crt 2>/dev/null || cp /tmp/ca.crt ./var/lib/kubelet/ca.crt
+cp /tmp/ca.crt /var/lib/kubelet/pki/ca.crt 2>/dev/null || cp /tmp/ca.crt ./var/lib/kubelet/pki/ca.crt
 ```
 
 ## 4. Configure kubectl
@@ -108,7 +105,7 @@ $KUBEBUILDER_DIR/bin/kubectl config use-context test-context
 
 ## 5. Create Configuration Files
 
-**CNI Configuration** (`/etc/cni/net.d/10-mynet.conf`):
+**CNI Configuration** (create in `/etc/cni/net.d/10-mynet.conf` or `./etc/cni/net.d/10-mynet.conf` if permission denied):
 ```json
 {
     "cniVersion": "0.3.1",
@@ -127,7 +124,7 @@ $KUBEBUILDER_DIR/bin/kubectl config use-context test-context
 }
 ```
 
-**containerd Configuration** (`/etc/containerd/config.toml`):
+**containerd Configuration** (create in `/etc/containerd/config.toml` or `./etc/containerd/config.toml` if permission denied):
 ```toml
 version = 3
 
@@ -155,7 +152,7 @@ version = 3
   SystemdCgroup = false
 ```
 
-**kubelet Configuration** (`/var/lib/kubelet/config.yaml`):
+**kubelet Configuration** (create in `/var/lib/kubelet/config.yaml` or `./var/lib/kubelet/config.yaml` if permission denied):
 ```yaml
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -222,7 +219,10 @@ echo $! > /tmp/apiserver.pid
 **Start containerd:**
 ```bash
 export PATH=$PATH:/opt/cni/bin:$KUBEBUILDER_DIR/bin
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c /etc/containerd/config.toml &
+# Use system config or local config if permission denied
+CONTAINERD_CONFIG="/etc/containerd/config.toml"
+[ ! -w "/etc/containerd" ] && CONTAINERD_CONFIG="./etc/containerd/config.toml"
+PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c "$CONTAINERD_CONFIG" &
 echo $! > /tmp/containerd.pid
 ```
 
@@ -239,7 +239,7 @@ echo $! > /tmp/scheduler.pid
 **Prepare kubelet prerequisites:**
 ```bash
 # Copy kubeconfig
-cp /root/.kube/config /var/lib/kubelet/kubeconfig
+cp /root/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp /root/.kube/config ./var/lib/kubelet/kubeconfig
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 
@@ -250,9 +250,12 @@ $KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.cr
 
 **Start kubelet:**
 ```bash
+# Use system paths or local paths if permission denied
+KUBELET_DIR="/var/lib/kubelet"
+[ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
-    --kubeconfig=/var/lib/kubelet/kubeconfig \
-    --config=/var/lib/kubelet/config.yaml \
+    --kubeconfig=$KUBELET_DIR/kubeconfig \
+    --config=$KUBELET_DIR/config.yaml \
     --root-dir=/var/lib/kubelet \
     --cert-dir=/var/lib/kubelet/pki \
     --hostname-override=$(hostname) \
@@ -273,13 +276,16 @@ $KUBEBUILDER_DIR/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/mas
 
 **Start kube-controller-manager:**
 ```bash
+# Use system paths or local paths if permission denied
+KUBELET_DIR="/var/lib/kubelet"
+[ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
-    --kubeconfig=/var/lib/kubelet/kubeconfig \
+    --kubeconfig=$KUBELET_DIR/kubeconfig \
     --leader-elect=false \
     --cloud-provider=external \
     --service-cluster-ip-range=10.0.0.0/24 \
     --cluster-name=kubernetes \
-    --root-ca-file=/var/lib/kubelet/ca.crt \
+    --root-ca-file=$KUBELET_DIR/ca.crt \
     --service-account-private-key-file=/tmp/sa.key \
     --use-service-account-credentials=true \
     --v=2 &

@@ -28,14 +28,24 @@ trap cleanup_on_failure ERR
 # 1. Create required directories
 echo "Creating directories..."
 mkdir -p $KUBEBUILDER_DIR/bin
-mkdir -p /etc/cni/net.d
-mkdir -p /var/lib/kubelet
-mkdir -p /var/lib/kubelet/pki
-mkdir -p /etc/kubernetes/manifests
-mkdir -p /var/log/kubernetes
-mkdir -p /etc/containerd/
-mkdir -p /run/containerd
-mkdir -p /opt/cni/bin
+
+# Try to create system directories, use local if permission denied
+mkdir -p /etc/cni/net.d || mkdir -p ./etc/cni/net.d
+mkdir -p /var/lib/kubelet || mkdir -p ./var/lib/kubelet
+mkdir -p /var/lib/kubelet/pki || mkdir -p ./var/lib/kubelet/pki
+mkdir -p /etc/kubernetes/manifests || mkdir -p ./etc/kubernetes/manifests
+mkdir -p /var/log/kubernetes || mkdir -p ./var/log/kubernetes
+mkdir -p /etc/containerd || mkdir -p ./etc/containerd
+mkdir -p /run/containerd || mkdir -p ./run/containerd
+mkdir -p /opt/cni/bin || mkdir -p ./opt/cni/bin
+
+# Set fallback paths if system directories aren't available
+CNI_CONF_DIR="/etc/cni/net.d"
+KUBELET_DIR="/var/lib/kubelet"
+CONTAINERD_CONFIG="/etc/containerd/config.toml"
+[ ! -w "/etc/cni/net.d" ] && CNI_CONF_DIR="./etc/cni/net.d"
+[ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
+[ ! -w "/etc/containerd" ] && CONTAINERD_CONFIG="./etc/containerd/config.toml"
 
 # 2. Download components if they don't exist
 echo "Checking and downloading components..."
@@ -100,11 +110,12 @@ echo "${TOKEN},admin,admin,system:masters" > /tmp/token.csv
 
 openssl genrsa -out /tmp/ca.key 2048
 openssl req -x509 -new -nodes -key /tmp/ca.key -subj "/CN=kubelet-ca" -days 365 -out /tmp/ca.crt
-cp /tmp/ca.crt /var/lib/kubelet/ca.crt
-cp /tmp/ca.crt /var/lib/kubelet/pki/ca.crt
+cp /tmp/ca.crt "$KUBELET_DIR/ca.crt"
+cp /tmp/ca.crt "$KUBELET_DIR/pki/ca.crt"
 
 # 4. Configure kubectl
 echo "Configuring kubectl..."
+mkdir -p ~/.kube
 $KUBEBUILDER_DIR/bin/kubectl config set-credentials test-user --token=1234567890
 $KUBEBUILDER_DIR/bin/kubectl config set-cluster test-env --server=https://127.0.0.1:6443 --insecure-skip-tls-verify
 $KUBEBUILDER_DIR/bin/kubectl config set-context test-context --cluster=test-env --user=test-user --namespace=default
@@ -114,7 +125,7 @@ $KUBEBUILDER_DIR/bin/kubectl config use-context test-context
 echo "Creating configuration files..."
 
 # CNI config
-cat > /etc/cni/net.d/10-mynet.conf <<EOF
+cat > "$CNI_CONF_DIR/10-mynet.conf" <<EOF
 {
     "cniVersion": "0.3.1",
     "name": "mynet",
@@ -133,7 +144,7 @@ cat > /etc/cni/net.d/10-mynet.conf <<EOF
 EOF
 
 # containerd config
-cat > /etc/containerd/config.toml <<EOF
+cat > "$CONTAINERD_CONFIG" <<EOF
 version = 3
 
 [grpc]
@@ -151,7 +162,7 @@ version = 3
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
   bin_dir = "/opt/cni/bin"
-  conf_dir = "/etc/cni/net.d"
+  conf_dir = "$CNI_CONF_DIR"
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
@@ -161,7 +172,7 @@ version = 3
 EOF
 
 # kubelet config
-cat > /var/lib/kubelet/config.yaml <<EOF
+cat > "$KUBELET_DIR/config.yaml" <<EOF
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
@@ -228,7 +239,7 @@ echo "Waiting for API server to start..."
 sleep 5
 
 echo "Starting containerd..."
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c /etc/containerd/config.toml &
+PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c "$CONTAINERD_CONFIG" &
 echo $! > /tmp/containerd.pid
 
 echo "Waiting for containerd to start..."
@@ -244,7 +255,7 @@ echo $! > /tmp/scheduler.pid
 
 echo "Preparing kubelet prerequisites..."
 # Copy kubeconfig
-cp /root/.kube/config /var/lib/kubelet/kubeconfig
+cp /root/.kube/config $KUBELET_DIR/kubeconfig
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 
@@ -254,8 +265,8 @@ $KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.cr
 
 echo "Starting kubelet..."
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
-    --kubeconfig=/var/lib/kubelet/kubeconfig \
-    --config=/var/lib/kubelet/config.yaml \
+    --kubeconfig=$KUBELET_DIR/kubeconfig \
+    --config=$KUBELET_DIR/config.yaml \
     --root-dir=/var/lib/kubelet \
     --cert-dir=/var/lib/kubelet/pki \
     --hostname-override=$(hostname) \
@@ -276,12 +287,12 @@ $KUBEBUILDER_DIR/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/mas
 
 echo "Starting kube-controller-manager..."
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
-    --kubeconfig=/var/lib/kubelet/kubeconfig \
+    --kubeconfig=$KUBELET_DIR/kubeconfig \
     --leader-elect=false \
     --cloud-provider=external \
     --service-cluster-ip-range=10.0.0.0/24 \
     --cluster-name=kubernetes \
-    --root-ca-file=/var/lib/kubelet/ca.crt \
+    --root-ca-file=$KUBELET_DIR/ca.crt \
     --service-account-private-key-file=/tmp/sa.key \
     --use-service-account-credentials=true \
     --v=2 &
