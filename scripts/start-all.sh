@@ -150,6 +150,13 @@ version = 3
 [grpc]
   address = "/run/containerd/containerd.sock"
 
+[plugins.'io.containerd.grpc.v1.cri']
+  sandbox_image = "registry.k8s.io/pause:3.10"
+
+[plugins.'io.containerd.grpc.v1.cri'.containerd]
+  default_runtime_name = "runc"
+  runtimes = { "runc" = { runtime_type = "io.containerd.runc.v2" } }
+
 [plugins.'io.containerd.cri.v1.runtime']
   enable_selinux = false
   enable_unprivileged_ports = true
@@ -169,6 +176,10 @@ version = 3
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
   SystemdCgroup = false
+
+[plugins.'io.containerd.grpc.v1.cri'.containerd]
+  default_runtime_name = "runc"
+  runtimes = { "runc" = { runtime_type = "io.containerd.runc.v2" } }
 EOF
 
 # kubelet config
@@ -215,6 +226,9 @@ echo "Waiting for etcd to start..."
 sleep 3
 
 echo "Starting kube-apiserver..."
+# Create writable cert directory
+mkdir -p ./var/run/kubernetes
+
 $KUBEBUILDER_DIR/bin/kube-apiserver \
     --etcd-servers=http://$HOST_IP:2379 \
     --service-cluster-ip-range=10.0.0.0/24 \
@@ -232,14 +246,18 @@ $KUBEBUILDER_DIR/bin/kube-apiserver \
     --cloud-provider=external \
     --service-account-issuer=https://kubernetes.default.svc.cluster.local \
     --service-account-key-file=/tmp/sa.pub \
-    --service-account-signing-key-file=/tmp/sa.key &
+    --service-account-signing-key-file=/tmp/sa.key \
+    --cert-dir=./var/run/kubernetes \
+    --etcd-prefix=/kubernetes &
 echo $! > /tmp/apiserver.pid
 
 echo "Waiting for API server to start..."
 sleep 5
 
 echo "Starting containerd..."
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c "$CONTAINERD_CONFIG" &
+# Create writable containerd directory
+mkdir -p ./var/lib/containerd
+PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root ./var/lib/containerd &
 echo $! > /tmp/containerd.pid
 
 echo "Waiting for containerd to start..."
@@ -247,7 +265,7 @@ sleep 3
 
 echo "Starting kube-scheduler..."
 $KUBEBUILDER_DIR/bin/kube-scheduler \
-    --kubeconfig=/root/.kube/config \
+    --kubeconfig=$HOME/.kube/config \
     --leader-elect=false \
     --v=2 \
     --bind-address=0.0.0.0 &
@@ -255,7 +273,7 @@ echo $! > /tmp/scheduler.pid
 
 echo "Preparing kubelet prerequisites..."
 # Copy kubeconfig
-cp /root/.kube/config $KUBELET_DIR/kubeconfig
+cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 

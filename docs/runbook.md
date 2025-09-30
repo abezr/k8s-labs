@@ -195,6 +195,9 @@ echo $! > /tmp/etcd.pid
 
 **Start kube-apiserver:**
 ```bash
+# Create writable cert directory
+mkdir -p ./var/run/kubernetes
+
 $KUBEBUILDER_DIR/bin/kube-apiserver \
     --etcd-servers=http://$HOST_IP:2379 \
     --service-cluster-ip-range=10.0.0.0/24 \
@@ -212,7 +215,9 @@ $KUBEBUILDER_DIR/bin/kube-apiserver \
     --cloud-provider=external \
     --service-account-issuer=https://kubernetes.default.svc.cluster.local \
     --service-account-key-file=/tmp/sa.pub \
-    --service-account-signing-key-file=/tmp/sa.key &
+    --service-account-signing-key-file=/tmp/sa.key \
+    --cert-dir=./var/run/kubernetes \
+    --etcd-prefix=/kubernetes &
 echo $! > /tmp/apiserver.pid
 ```
 
@@ -229,7 +234,7 @@ echo $! > /tmp/containerd.pid
 **Start kube-scheduler:**
 ```bash
 $KUBEBUILDER_DIR/bin/kube-scheduler \
-    --kubeconfig=/root/.kube/config \
+    --kubeconfig=$HOME/.kube/config \
     --leader-elect=false \
     --v=2 \
     --bind-address=0.0.0.0 &
@@ -256,8 +261,8 @@ KUBELET_DIR="/var/lib/kubelet"
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --config=$KUBELET_DIR/config.yaml \
-    --root-dir=/var/lib/kubelet \
-    --cert-dir=/var/lib/kubelet/pki \
+    --root-dir=$KUBELET_DIR \
+    --cert-dir=$KUBELET_DIR/pki \
     --hostname-override=$(hostname) \
     --pod-infra-container-image=registry.k8s.io/pause:3.10 \
     --node-ip=$HOST_IP \
