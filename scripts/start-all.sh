@@ -191,7 +191,7 @@ authentication:
   webhook:
     enabled: true
   x509:
-    clientCAFile: "/var/lib/kubelet/ca.crt"
+    clientCAFile: "$KUBELET_DIR/ca.crt"
 authorization:
   mode: AlwaysAllow
 clusterDomain: "cluster.local"
