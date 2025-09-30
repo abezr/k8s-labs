@@ -150,6 +150,9 @@ version = 3
 [grpc]
   address = "/run/containerd/containerd.sock"
 
+[state]
+  run = "./run/containerd"
+
 [plugins.'io.containerd.grpc.v1.cri']
   sandbox_image = "registry.k8s.io/pause:3.10"
 
@@ -251,9 +254,13 @@ echo "Waiting for API server to start..."
 sleep 5
 
 echo "Starting containerd..."
-# Create writable containerd directory
+# Create writable containerd directories
 mkdir -p ./var/lib/containerd
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root ./var/lib/containerd &
+mkdir -p ./run/containerd
+# Set containerd runtime state directory
+export CONTAINERD_ROOT="./var/lib/containerd"
+export CONTAINERD_STATE_DIR="./run/containerd"
+PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" &
 echo $! > /tmp/containerd.pid
 
 echo "Waiting for containerd to start..."
@@ -281,8 +288,8 @@ echo "Starting kubelet..."
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --config=$KUBELET_DIR/config.yaml \
-    --root-dir=/var/lib/kubelet \
-    --cert-dir=/var/lib/kubelet/pki \
+    --root-dir=$KUBELET_DIR \
+    --cert-dir=$KUBELET_DIR/pki \
     --hostname-override=$(hostname) \
     --pod-infra-container-image=registry.k8s.io/pause:3.10 \
     --node-ip=$HOST_IP \

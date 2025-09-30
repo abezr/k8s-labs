@@ -131,6 +131,9 @@ version = 3
 [grpc]
   address = "/run/containerd/containerd.sock"
 
+[state]
+  run = "./run/containerd"
+
 [plugins.'io.containerd.cri.v1.runtime']
   enable_selinux = false
   enable_unprivileged_ports = true
@@ -224,10 +227,15 @@ echo $! > /tmp/apiserver.pid
 **Start containerd:**
 ```bash
 export PATH=$PATH:/opt/cni/bin:$KUBEBUILDER_DIR/bin
+# Create writable containerd directories
+mkdir -p ./var/lib/containerd ./run/containerd
 # Use system config or local config if permission denied
 CONTAINERD_CONFIG="/etc/containerd/config.toml"
 [ ! -w "/etc/containerd" ] && CONTAINERD_CONFIG="./etc/containerd/config.toml"
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd -c "$CONTAINERD_CONFIG" &
+# Set containerd runtime state directory
+export CONTAINERD_ROOT="./var/lib/containerd"
+export CONTAINERD_STATE_DIR="./run/containerd"
+PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" &
 echo $! > /tmp/containerd.pid
 ```
 
