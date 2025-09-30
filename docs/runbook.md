@@ -248,9 +248,9 @@ cp /root/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp /root/.kube/
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 
-# Create service account and configmap
-$KUBEBUILDER_DIR/bin/kubectl create sa default
-$KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default
+# Create service account and configmap (ignore if already exists)
+$KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "Service account may already exist"
+$KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "ConfigMap may already exist"
 ```
 
 **Start kubelet:**

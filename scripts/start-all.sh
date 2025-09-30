@@ -153,10 +153,6 @@ version = 3
 [plugins.'io.containerd.grpc.v1.cri']
   sandbox_image = "registry.k8s.io/pause:3.10"
 
-[plugins.'io.containerd.grpc.v1.cri'.containerd]
-  default_runtime_name = "runc"
-  runtimes = { "runc" = { runtime_type = "io.containerd.runc.v2" } }
-
 [plugins.'io.containerd.cri.v1.runtime']
   enable_selinux = false
   enable_unprivileged_ports = true
@@ -277,9 +273,9 @@ cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 
-# Create service account and configmap
-$KUBEBUILDER_DIR/bin/kubectl create sa default
-$KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default
+# Create service account and configmap (ignore if already exists)
+$KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "Service account may already exist"
+$KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "ConfigMap may already exist"
 
 echo "Starting kubelet..."
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
