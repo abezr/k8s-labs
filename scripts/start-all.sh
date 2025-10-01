@@ -47,6 +47,29 @@ CONTAINERD_CONFIG="/etc/containerd/config.toml"
 [ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
 [ ! -w "/etc/containerd" ] && CONTAINERD_CONFIG="./etc/containerd/config.toml"
 
+# Compute absolute paths to avoid duplicate relative segments in generated files
+CNI_BIN_ABS="$(cd "$CNI_BIN" && pwd)"
+CNI_CONF_DIR_ABS="$(cd "$CNI_CONF_DIR" && pwd)"
+KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
+if [ -d "/etc/kubernetes/manifests" ]; then
+  KUBE_MANIFESTS_DIR="/etc/kubernetes/manifests"
+else
+  KUBE_MANIFESTS_DIR="./etc/kubernetes/manifests"
+fi
+KUBE_MANIFESTS_DIR_ABS="$(cd "$KUBE_MANIFESTS_DIR" && pwd)"
+
+# Choose containerd socket/state paths based on permissions
+if [ -w "/run" ]; then
+  CONTAINERD_SOCK="/run/containerd/containerd.sock"
+  CONTAINERD_STATE="/run/containerd"
+else
+  CONTAINERD_SOCK="$(pwd)/run/containerd/containerd.sock"
+  CONTAINERD_STATE="$(pwd)/run/containerd"
+fi
+
+# Compute absolute kubelet dir to avoid duplicate relative paths in kubeconfig
+KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
+
 # Select log directory
 LOG_DIR="/var/log/kubernetes"
 [ ! -w "/var/log/kubernetes" ] && LOG_DIR="./var/log/kubernetes"
@@ -156,10 +179,10 @@ cat > "$CONTAINERD_CONFIG" <<EOF
 version = 3
 
 [grpc]
-  address = "/run/containerd/containerd.sock"
+  address = "${CONTAINERD_SOCK}"
 
 [state]
-  run = "/run/containerd"
+  run = "${CONTAINERD_STATE}"
 
 [plugins.'io.containerd.grpc.v1.cri']
   sandbox_image = "registry.k8s.io/pause:3.10"
@@ -175,8 +198,8 @@ version = 3
   disable_snapshot_annotations = true
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
-  bin_dir = "/opt/cni/bin"
-  conf_dir = "/etc/cni/net.d"
+  bin_dir = "${CNI_BIN_ABS}"
+  conf_dir = "${CNI_CONF_DIR_ABS}"
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
@@ -210,8 +233,8 @@ runtimeRequestTimeout: "15m"
 failSwapOn: false
 seccompDefault: true
 serverTLSBootstrap: false
-containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
-staticPodPath: "./etc/kubernetes/manifests"
+containerRuntimeEndpoint: "unix://${CONTAINERD_SOCK}"
+staticPodPath: "${KUBE_MANIFESTS_DIR_ABS}"
 EOF
 
 # 6. Start components in order
@@ -273,7 +296,15 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_
 echo $! > /tmp/containerd.pid
 
 echo "Waiting for containerd to start..."
-sleep 3
+# Wait up to ~10s for socket
+for i in {1..10}; do
+  [ -S /run/containerd/containerd.sock ] && break
+  sleep 1
+done
+if [ ! -S /run/containerd/containerd.sock ]; then
+  echo "WARNING: containerd socket not found at /run/containerd/containerd.sock"
+  tail -n 50 "$LOG_DIR/containerd.log" || true
+fi
 
 echo "Starting kube-scheduler..."
 $KUBEBUILDER_DIR/bin/kube-scheduler \
@@ -284,12 +315,18 @@ $KUBEBUILDER_DIR/bin/kube-scheduler \
 echo $! > /tmp/scheduler.pid
 
 echo "Preparing kubelet prerequisites..."
-# Copy kubeconfig for kubelet
+# Copy kubeconfig for kubelet (used by kubectl; kubelet uses bootstrap-kubeconfig below)
 cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 
 # Also copy to the path expected by controller manager
 cp $HOME/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp $HOME/.kube/config ./var/lib/kubelet/kubeconfig
 export KUBECONFIG=~/.kube/config
+
+# Build bootstrap kubeconfig for kubelet (absolute paths)
+$KUBEBUILDER_DIR/bin/kubectl config set-cluster manual --server=https://127.0.0.1:6443 --insecure-skip-tls-verify=true --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+$KUBEBUILDER_DIR/bin/kubectl config set-credentials kubelet-bootstrap --token=$TOKEN --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+$KUBEBUILDER_DIR/bin/kubectl config set-context bootstrap --cluster=manual --user=kubelet-bootstrap --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+$KUBEBUILDER_DIR/bin/kubectl config use-context bootstrap --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
 
 # Create service account and configmap (ignore if already exists)
 $KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "Service account may already exist"
@@ -298,13 +335,15 @@ $KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.cr
 echo "Starting kubelet..."
 # Ensure all necessary files exist
 cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
+# Remove any stale kubelet client kubeconfig to force regeneration with absolute paths
+rm -f "${KUBELET_DIR_ABS}/kubeconfig"
 
 if command -v sudo >/dev/null 2>&1; then
   sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
-    --kubeconfig=$KUBELET_DIR/kubeconfig \
-    --config=$KUBELET_DIR/config.yaml \
-    --root-dir=$KUBELET_DIR \
-    --cert-dir=$KUBELET_DIR/pki \
+    --kubeconfig=$KUBELET_DIR_ABS/kubeconfig \
+    --config=$KUBELET_DIR_ABS/config.yaml \
+    --root-dir=$KUBELET_DIR_ABS \
+    --cert-dir=$KUBELET_DIR_ABS/pki \
     --hostname-override=$(hostname) \
     --pod-infra-container-image=registry.k8s.io/pause:3.10 \
     --node-ip=$HOST_IP \
@@ -312,14 +351,14 @@ if command -v sudo >/dev/null 2>&1; then
     --cgroup-driver=cgroupfs \
     --max-pods=4  \
     --v=2 \
-    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig \
+    --bootstrap-kubeconfig=$KUBELET_DIR_ABS/bootstrap-kubeconfig \
     >> $LOG_DIR/kubelet.log 2>&1 & echo \$! > /tmp/kubelet.pid"
 else
   $KUBEBUILDER_DIR/bin/kubelet \
-    --kubeconfig=$KUBELET_DIR/kubeconfig \
-    --config=$KUBELET_DIR/config.yaml \
-    --root-dir=$KUBELET_DIR \
-    --cert-dir=$KUBELET_DIR/pki \
+    --kubeconfig=$KUBELET_DIR_ABS/kubeconfig \
+    --config=$KUBELET_DIR_ABS/config.yaml \
+    --root-dir=$KUBELET_DIR_ABS \
+    --cert-dir=$KUBELET_DIR_ABS/pki \
     --hostname-override=$(hostname) \
     --pod-infra-container-image=registry.k8s.io/pause:3.10 \
     --node-ip=$HOST_IP \
@@ -327,7 +366,7 @@ else
     --cgroup-driver=cgroupfs \
     --max-pods=4  \
     --v=2 \
-    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig \
+    --bootstrap-kubeconfig=$KUBELET_DIR_ABS/bootstrap-kubeconfig \
     >> $LOG_DIR/kubelet.log 2>&1 & echo $! > /tmp/kubelet.pid
 fi
 
