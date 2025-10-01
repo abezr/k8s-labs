@@ -1,11 +1,13 @@
 #!/bin/bash
 
 # Kubernetes Manual Control Plane Startup Script
-# Starts all components in the correct order with PID tracking
+# Starts all components in the correct order with PID tracking (Codespaces-friendly, no systemd)
 
 set -e  # Exit on any error
 
+# -----------------------------------------------------------------------------
 # Configuration
+# -----------------------------------------------------------------------------
 KUBEBUILDER_DIR="./kubebuilder"
 CNI_BIN="./opt/cni/bin"
 HOST_IP=$(hostname -I | awk '{print $1}')
@@ -15,31 +17,32 @@ echo "=== Kubernetes Manual Control Plane Setup ==="
 echo "HOST_IP: $HOST_IP"
 echo "Starting components in order..."
 
-# Function to cleanup on failure
+# -----------------------------------------------------------------------------
+# Cleanup on failure
+# -----------------------------------------------------------------------------
 cleanup_on_failure() {
     echo "ERROR: Setup failed, cleaning up..."
-    ./scripts/stop-all.sh
+    ./scripts/stop-all.sh || true
     exit 1
 }
-
-# Set trap for cleanup on script failure
 trap cleanup_on_failure ERR
 
-# 1. Create required directories
+# -----------------------------------------------------------------------------
+# 1. Create required directories (prefer system dirs, fall back to local)
+# -----------------------------------------------------------------------------
 echo "Creating directories..."
-mkdir -p $KUBEBUILDER_DIR/bin
+mkdir -p "$KUBEBUILDER_DIR/bin"
 
-# Try to create system directories, use local if permission denied
+# Try to create system directories; fall back to local if permission denied
 mkdir -p /etc/cni/net.d || mkdir -p ./etc/cni/net.d
 mkdir -p /var/lib/kubelet || mkdir -p ./var/lib/kubelet
 mkdir -p /var/lib/kubelet/pki || mkdir -p ./var/lib/kubelet/pki
 mkdir -p /etc/kubernetes/manifests || mkdir -p ./etc/kubernetes/manifests
 mkdir -p /var/log/kubernetes || mkdir -p ./var/log/kubernetes
 mkdir -p /etc/containerd || mkdir -p ./etc/containerd
-mkdir -p /run/containerd || mkdir -p ./run/containerd
-mkdir -p /opt/cni/bin || mkdir -p ./opt/cni/bin
+mkdir -p ./run/containerd
 
-# Set fallback paths if system directories aren't available
+# Fallback paths if system paths not writable
 CNI_CONF_DIR="/etc/cni/net.d"
 KUBELET_DIR="/var/lib/kubelet"
 CONTAINERD_CONFIG="/etc/containerd/config.toml"
@@ -47,109 +50,88 @@ CONTAINERD_CONFIG="/etc/containerd/config.toml"
 [ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
 [ ! -w "/etc/containerd" ] && CONTAINERD_CONFIG="./etc/containerd/config.toml"
 
-# Compute absolute paths to avoid duplicate relative segments in generated files
+# Compute absolute paths to avoid relative path duplication in generated files
+WORKDIR="$(pwd)"
 CNI_BIN_ABS="$(cd "$CNI_BIN" && pwd)"
 CNI_CONF_DIR_ABS="$(cd "$CNI_CONF_DIR" && pwd)"
 KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
-if [ -d "/etc/kubernetes/manifests" ]; then
+
+if [ -d "/etc/kubernetes/manifests" ] && [ -w "/etc/kubernetes/manifests" ]; then
   KUBE_MANIFESTS_DIR="/etc/kubernetes/manifests"
 else
   KUBE_MANIFESTS_DIR="./etc/kubernetes/manifests"
 fi
 KUBE_MANIFESTS_DIR_ABS="$(cd "$KUBE_MANIFESTS_DIR" && pwd)"
 
-# Choose containerd socket/state paths based on permissions
-if [ -w "/run" ]; then
-  CONTAINERD_SOCK="/run/containerd/containerd.sock"
-  CONTAINERD_STATE="/run/containerd"
-else
-  CONTAINERD_SOCK="$(pwd)/run/containerd/containerd.sock"
-  CONTAINERD_STATE="$(pwd)/run/containerd"
-fi
+# Containerd runtime/root directories and socket (always use local to avoid root)
+CONTAINERD_ROOT="./var/lib/containerd"
+CONTAINERD_STATE="./run/containerd"
+CONTAINERD_SOCK_ABS="$WORKDIR/run/containerd/containerd.sock"
 
-# Compute absolute paths to avoid duplicate relative segments in generated files
-CNI_BIN_ABS="$(cd "$CNI_BIN" && pwd)"
-CNI_CONF_DIR_ABS="$(cd "$CNI_CONF_DIR" && pwd)"
-KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
-if [ -d "/etc/kubernetes/manifests" ]; then
-  KUBE_MANIFESTS_DIR="/etc/kubernetes/manifests"
-else
-  KUBE_MANIFESTS_DIR="./etc/kubernetes/manifests"
-fi
-KUBE_MANIFESTS_DIR_ABS="$(cd "$KUBE_MANIFESTS_DIR" && pwd)"
-
-# Choose containerd socket/state paths based on permissions
-if [ -w "/run" ]; then
-  CONTAINERD_SOCK="/run/containerd/containerd.sock"
-  CONTAINERD_STATE="/run/containerd"
-else
-  CONTAINERD_SOCK="$(pwd)/run/containerd/containerd.sock"
-  CONTAINERD_STATE="$(pwd)/run/containerd"
-fi
-
-# Compute absolute kubelet dir to avoid duplicate relative paths in kubeconfig
-KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
-
-# Select log directory
+# Log directory
 LOG_DIR="/var/log/kubernetes"
 [ ! -w "/var/log/kubernetes" ] && LOG_DIR="./var/log/kubernetes"
 
-# 2. Download components if they don't exist
+# Ensure dirs exist
+mkdir -p "$CONTAINERD_ROOT" "$CONTAINERD_STATE" "$LOG_DIR"
+
+# -----------------------------------------------------------------------------
+# 2. Download components if not present
+# -----------------------------------------------------------------------------
 echo "Checking and downloading components..."
 
 # kubebuilder tools (includes etcd, kubectl)
 if [ ! -f "$KUBEBUILDER_DIR/bin/etcd" ]; then
-    echo "Downloading kubebuilder tools..."
-    curl -L https://storage.googleapis.com/kubebuilder-tools/kubebuilder-tools-1.30.0-linux-amd64.tar.gz -o /tmp/kubebuilder-tools.tar.gz
-    tar -C $KUBEBUILDER_DIR --strip-components=1 -zxf /tmp/kubebuilder-tools.tar.gz
-    rm /tmp/kubebuilder-tools.tar.gz
-    chmod -R 755 $KUBEBUILDER_DIR/bin
+  echo "Downloading kubebuilder tools..."
+  curl -L https://storage.googleapis.com/kubebuilder-tools/kubebuilder-tools-1.30.0-linux-amd64.tar.gz -o /tmp/kubebuilder-tools.tar.gz
+  tar -C "$KUBEBUILDER_DIR" --strip-components=1 -zxf /tmp/kubebuilder-tools.tar.gz
+  rm -f /tmp/kubebuilder-tools.tar.gz
+  chmod -R 755 "$KUBEBUILDER_DIR/bin"
 fi
 
 # kubelet
 if [ ! -f "$KUBEBUILDER_DIR/bin/kubelet" ]; then
-    echo "Downloading kubelet..."
-    curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/kubelet" -o $KUBEBUILDER_DIR/bin/kubelet
-    chmod 755 $KUBEBUILDER_DIR/bin/kubelet
+  echo "Downloading kubelet..."
+  curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/kubelet" -o "$KUBEBUILDER_DIR/bin/kubelet"
+  chmod 755 "$KUBEBUILDER_DIR/bin/kubelet"
 fi
 
-# controller manager and scheduler
+# controller-manager, scheduler, cloud-controller-manager
 if [ ! -f "$KUBEBUILDER_DIR/bin/kube-controller-manager" ]; then
-    echo "Downloading controller manager and scheduler..."
-    curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/kube-controller-manager" -o $KUBEBUILDER_DIR/bin/kube-controller-manager
-    curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/kube-scheduler" -o $KUBEBUILDER_DIR/bin/kube-scheduler
-    curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/cloud-controller-manager" -o $KUBEBUILDER_DIR/bin/cloud-controller-manager
-
-    chmod 755 $KUBEBUILDER_DIR/bin/kube-controller-manager
-    chmod 755 $KUBEBUILDER_DIR/bin/kube-scheduler
-    chmod 755 $KUBEBUILDER_DIR/bin/cloud-controller-manager
+  echo "Downloading controller manager and scheduler..."
+  curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/kube-controller-manager" -o "$KUBEBUILDER_DIR/bin/kube-controller-manager"
+  curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/kube-scheduler" -o "$KUBEBUILDER_DIR/bin/kube-scheduler"
+  curl -L "https://dl.k8s.io/v1.30.0/bin/linux/amd64/cloud-controller-manager" -o "$KUBEBUILDER_DIR/bin/cloud-controller-manager"
+  chmod 755 "$KUBEBUILDER_DIR/bin/kube-controller-manager" "$KUBEBUILDER_DIR/bin/kube-scheduler" "$KUBEBUILDER_DIR/bin/cloud-controller-manager"
 fi
 
-# containerd
+# containerd (static) - prefer local static containerd to avoid system version schema conflicts
 if [ ! -f "$CNI_BIN/containerd" ]; then
-    echo "Downloading containerd..."
-    wget https://github.com/containerd/containerd/releases/download/v2.0.5/containerd-static-2.0.5-linux-amd64.tar.gz -O /tmp/containerd.tar.gz
-    mkdir -p ./opt/cni
-    tar zxf /tmp/containerd.tar.gz -C ./opt/cni/
-    rm /tmp/containerd.tar.gz
+  echo "Downloading containerd static binary..."
+  wget https://github.com/containerd/containerd/releases/download/v2.0.5/containerd-static-2.0.5-linux-amd64.tar.gz -O /tmp/containerd.tar.gz
+  mkdir -p ./opt/cni
+  tar zxf /tmp/containerd.tar.gz -C ./opt/cni/
+  rm -f /tmp/containerd.tar.gz
 fi
 
 # runc
 if [ ! -f "$CNI_BIN/runc" ]; then
-    echo "Downloading runc..."
-    curl -L "https://github.com/opencontainers/runc/releases/download/v1.2.6/runc.amd64" -o $CNI_BIN/runc
-    chmod +x $CNI_BIN/runc
+  echo "Downloading runc..."
+  curl -L "https://github.com/opencontainers/runc/releases/download/v1.2.6/runc.amd64" -o "$CNI_BIN/runc"
+  chmod +x "$CNI_BIN/runc"
 fi
 
 # CNI plugins
 if [ ! -f "$CNI_BIN/bridge" ]; then
-    echo "Downloading CNI plugins..."
-    wget https://github.com/containernetworking/plugins/releases/download/v1.6.2/cni-plugins-linux-amd64-v1.6.2.tgz -O /tmp/cni-plugins.tgz
-    tar zxf /tmp/cni-plugins.tgz -C $CNI_BIN/
-    rm /tmp/cni-plugins.tgz
+  echo "Downloading CNI plugins..."
+  wget https://github.com/containernetworking/plugins/releases/download/v1.6.2/cni-plugins-linux-amd64-v1.6.2.tgz -O /tmp/cni-plugins.tgz
+  tar zxf /tmp/cni-plugins.tgz -C "$CNI_BIN/"
+  rm -f /tmp/cni-plugins.tgz
 fi
 
+# -----------------------------------------------------------------------------
 # 3. Generate certificates and tokens
+# -----------------------------------------------------------------------------
 echo "Generating certificates and tokens..."
 openssl genrsa -out /tmp/sa.key 2048
 openssl rsa -in /tmp/sa.key -pubout -out /tmp/sa.pub
@@ -161,48 +143,51 @@ openssl req -x509 -new -nodes -key /tmp/ca.key -subj "/CN=kubelet-ca" -days 365 
 cp /tmp/ca.crt "$KUBELET_DIR/ca.crt"
 cp /tmp/ca.crt "$KUBELET_DIR/pki/ca.crt"
 
+# -----------------------------------------------------------------------------
 # 4. Configure kubectl
+# -----------------------------------------------------------------------------
 echo "Configuring kubectl..."
 mkdir -p ~/.kube
-$KUBEBUILDER_DIR/bin/kubectl config set-credentials test-user --token=1234567890
-$KUBEBUILDER_DIR/bin/kubectl config set-cluster test-env --server=https://127.0.0.1:6443 --insecure-skip-tls-verify
-$KUBEBUILDER_DIR/bin/kubectl config set-context test-context --cluster=test-env --user=test-user --namespace=default
-$KUBEBUILDER_DIR/bin/kubectl config use-context test-context
+"$KUBEBUILDER_DIR/bin/kubectl" config set-credentials test-user --token=1234567890
+"$KUBEBUILDER_DIR/bin/kubectl" config set-cluster test-env --server=https://127.0.0.1:6443 --insecure-skip-tls-verify
+"$KUBEBUILDER_DIR/bin/kubectl" config set-context test-context --cluster=test-env --user=test-user --namespace=default
+"$KUBEBUILDER_DIR/bin/kubectl" config use-context test-context
 
-# Set KUBECONFIG for kubelet
-export KUBECONFIG=$HOME/.kube/config
+# KUBECONFIG for subsequent kubectl calls
+export KUBECONFIG="$HOME/.kube/config"
 
+# -----------------------------------------------------------------------------
 # 5. Create configuration files
+# -----------------------------------------------------------------------------
 echo "Creating configuration files..."
 
-# CNI config
+# CNI config (bridge + host-local)
 cat > "$CNI_CONF_DIR/10-mynet.conf" <<EOF
 {
-    "cniVersion": "0.3.1",
-    "name": "mynet",
-    "type": "bridge",
-    "bridge": "cni0",
-    "isGateway": true,
-    "ipMasq": true,
-    "ipam": {
-        "type": "host-local",
-        "subnet": "10.22.0.0/16",
-        "routes": [
-            { "dst": "0.0.0.0/0" }
-        ]
-    }
+  "cniVersion": "0.3.1",
+  "name": "mynet",
+  "type": "bridge",
+  "bridge": "cni0",
+  "isGateway": true,
+  "ipMasq": true,
+  "ipam": {
+    "type": "host-local",
+    "subnet": "10.22.0.0/16",
+    "routes": [
+      { "dst": "0.0.0.0/0" }
+    ]
+  }
 }
 EOF
 
-# containerd config
+# containerd config (v2.0 schema - version = 3)
 cat > "$CONTAINERD_CONFIG" <<EOF
 version = 3
+root = "${WORKDIR}/var/lib/containerd"
+state = "${WORKDIR}/run/containerd"
 
 [grpc]
-  address = "${CONTAINERD_SOCK}"
-
-[state]
-  run = "${CONTAINERD_STATE}"
+  address = "${CONTAINERD_SOCK_ABS}"
 
 [plugins.'io.containerd.grpc.v1.cri']
   sandbox_image = "registry.k8s.io/pause:3.10"
@@ -232,7 +217,7 @@ version = 3
   runtimes = { "runc" = { runtime_type = "io.containerd.runc.v2" } }
 EOF
 
-# kubelet config
+# kubelet config (absolute paths; endpoint references local containerd socket)
 cat > "$KUBELET_DIR/config.yaml" <<EOF
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -253,159 +238,151 @@ runtimeRequestTimeout: "15m"
 failSwapOn: false
 seccompDefault: true
 serverTLSBootstrap: false
-containerRuntimeEndpoint: "unix://${CONTAINERD_SOCK}"
+containerRuntimeEndpoint: "unix://${CONTAINERD_SOCK_ABS}"
 staticPodPath: "${KUBE_MANIFESTS_DIR_ABS}"
 EOF
 
+# -----------------------------------------------------------------------------
 # 6. Start components in order
-echo "Starting etcd..."
-export PATH=$PATH:$CNI_BIN:$KUBEBUILDER_DIR/bin
+# -----------------------------------------------------------------------------
+export PATH="$PATH:$CNI_BIN:$KUBEBUILDER_DIR/bin"
 
-$KUBEBUILDER_DIR/bin/etcd \
-    --advertise-client-urls http://$HOST_IP:2379 \
-    --listen-client-urls http://0.0.0.0:2379 \
-    --data-dir ./etcd \
-    --listen-peer-urls http://0.0.0.0:2380 \
-    --initial-cluster default=http://$HOST_IP:2380 \
-    --initial-advertise-peer-urls http://$HOST_IP:2380 \
-    --initial-cluster-state new \
-    --initial-cluster-token test-token >> $LOG_DIR/etcd.log 2>&1 &
+echo "Starting etcd..."
+"$KUBEBUILDER_DIR/bin/etcd" \
+  --advertise-client-urls "http://$HOST_IP:2379" \
+  --listen-client-urls "http://0.0.0.0:2379" \
+  --data-dir ./etcd \
+  --listen-peer-urls "http://0.0.0.0:2380" \
+  --initial-cluster "default=http://$HOST_IP:2380" \
+  --initial-advertise-peer-urls "http://$HOST_IP:2380" \
+  --initial-cluster-state new \
+  --initial-cluster-token test-token >> "$LOG_DIR/etcd.log" 2>&1 &
 echo $! > /tmp/etcd.pid
 
 echo "Waiting for etcd to start..."
 sleep 3
 
 echo "Starting kube-apiserver..."
-# Create writable cert directory
 mkdir -p ./var/run/kubernetes
-
-$KUBEBUILDER_DIR/bin/kube-apiserver \
-    --etcd-servers=http://$HOST_IP:2379 \
-    --service-cluster-ip-range=10.0.0.0/24 \
-    --bind-address=0.0.0.0 \
-    --secure-port=6443 \
-    --advertise-address=$HOST_IP \
-    --authorization-mode=AlwaysAllow \
-    --token-auth-file=/tmp/token.csv \
-    --client-ca-file=/tmp/ca.crt \
-    --enable-priority-and-fairness=false \
-    --allow-privileged=true \
-    --profiling=false \
-    --storage-backend=etcd3 \
-    --storage-media-type=application/json \
-    --v=0 \
-    --cloud-provider=external \
-    --service-account-issuer=https://kubernetes.default.svc.cluster.local \
-    --service-account-key-file=/tmp/sa.pub \
-    --service-account-signing-key-file=/tmp/sa.key \
-    --cert-dir=./var/run/kubernetes \
-    --etcd-prefix=/kubernetes &
+"$KUBEBUILDER_DIR/bin/kube-apiserver" \
+  --etcd-servers="http://$HOST_IP:2379" \
+  --service-cluster-ip-range=10.0.0.0/24 \
+  --bind-address=0.0.0.0 \
+  --secure-port=6443 \
+  --advertise-address="$HOST_IP" \
+  --authorization-mode=AlwaysAllow \
+  --token-auth-file=/tmp/token.csv \
+  --client-ca-file=/tmp/ca.crt \
+  --enable-priority-and-fairness=false \
+  --allow-privileged=true \
+  --profiling=false \
+  --storage-backend=etcd3 \
+  --storage-media-type=application/json \
+  --v=0 \
+  --cloud-provider=external \
+  --service-account-issuer=https://kubernetes.default.svc.cluster.local \
+  --service-account-key-file=/tmp/sa.pub \
+  --service-account-signing-key-file=/tmp/sa.key \
+  --cert-dir=./var/run/kubernetes \
+  --etcd-prefix=/kubernetes >> "$LOG_DIR/kube-apiserver.log" 2>&1 &
 echo $! > /tmp/apiserver.pid
 
 echo "Waiting for API server to start..."
 sleep 5
 
-echo "Starting containerd..."
-# Create writable containerd directories
-mkdir -p ./var/lib/containerd
-mkdir -p ./run/containerd
-# Set containerd runtime state directory
-export CONTAINERD_ROOT="./var/lib/containerd"
-export CONTAINERD_STATE_DIR="./run/containerd"
-
-# Resolve containerd binary path (prefer system containerd, fallback to ./opt/cni/bin if present)
-CONTAINERD_BIN="$(command -v containerd || true)"
-if [ -z "$CONTAINERD_BIN" ] && [ -x "./opt/cni/bin/containerd" ]; then
-  CONTAINERD_BIN="./opt/cni/bin/containerd"
+echo "Starting containerd (local static preferred)..."
+# Prefer local static containerd (v2.0.5). Fallback to system containerd if local missing.
+CONTAINERD_BIN=""
+if [ -x "$CNI_BIN_ABS/containerd" ]; then
+  CONTAINERD_BIN="$CNI_BIN_ABS/containerd"
+else
+  CONTAINERD_BIN="$(command -v containerd || true)"
 fi
 if [ -z "$CONTAINERD_BIN" ]; then
-  echo "ERROR: containerd binary not found (looked for system containerd and ./opt/cni/bin/containerd)"
+  echo "ERROR: containerd binary not found (checked $CNI_BIN_ABS/containerd and system PATH)"
   exit 1
 fi
 
-# Start containerd, using sudo only if targeting /run and sudo is available
-if command -v sudo >/dev/null 2>&1 && [ "${CONTAINERD_SOCK}" = "/run/containerd/containerd.sock" ]; then
-  sudo -E bash -c "PATH=\$PATH:/opt/cni/bin:/usr/sbin \"$CONTAINERD_BIN\" --config '$CONTAINERD_CONFIG' --root '$CONTAINERD_ROOT' >> '$LOG_DIR/containerd.log' 2>&1 & echo \$! > /tmp/containerd.pid"
-else
-  PATH=$PATH:/opt/cni/bin:/usr/sbin "$CONTAINERD_BIN" --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" >> "$LOG_DIR/containerd.log" 2>&1 &
-  echo $! > /tmp/containerd.pid
-fi
+# Start containerd without sudo (local paths)
+PATH="$PATH:/opt/cni/bin:/usr/sbin" "$CONTAINERD_BIN" --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" >> "$LOG_DIR/containerd.log" 2>&1 &
+echo $! > /tmp/containerd.pid
 
-echo "Waiting for containerd to start..."
-# Wait up to ~10s for socket
-for i in {1..10}; do
-  [ -S "${CONTAINERD_SOCK}" ] && break
+echo "Waiting for containerd socket: $CONTAINERD_SOCK_ABS ..."
+for i in {1..15}; do
+  [ -S "$CONTAINERD_SOCK_ABS" ] && break
   sleep 1
 done
-if [ ! -S "${CONTAINERD_SOCK}" ]; then
-  echo "WARNING: containerd socket not found at ${CONTAINERD_SOCK}"
+if [ ! -S "$CONTAINERD_SOCK_ABS" ]; then
+  echo "WARNING: containerd socket not found at $CONTAINERD_SOCK_ABS"
   tail -n 100 "$LOG_DIR/containerd.log" || true
 fi
 
 echo "Starting kube-scheduler..."
-$KUBEBUILDER_DIR/bin/kube-scheduler \
-    --kubeconfig=$HOME/.kube/config \
-    --leader-elect=false \
-    --v=2 \
-    --bind-address=0.0.0.0 >> $LOG_DIR/kube-scheduler.log 2>&1 &
+"$KUBEBUILDER_DIR/bin/kube-scheduler" \
+  --kubeconfig="$HOME/.kube/config" \
+  --leader-elect=false \
+  --v=2 \
+  --bind-address=0.0.0.0 >> "$LOG_DIR/kube-scheduler.log" 2>&1 &
 echo $! > /tmp/scheduler.pid
 
+# -----------------------------------------------------------------------------
+# Kubelet prerequisites
+# -----------------------------------------------------------------------------
 echo "Preparing kubelet prerequisites..."
-# Copy kubeconfig for kubelet (used by kubectl; kubelet uses bootstrap-kubeconfig below)
-cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
+# kubeconfig used by kubectl; kubelet will use bootstrap-kubeconfig
+cp "$HOME/.kube/config" "$KUBELET_DIR/kubeconfig"
+cp "$HOME/.kube/config" /var/lib/kubelet/kubeconfig 2>/dev/null || cp "$HOME/.kube/config" "./var/lib/kubelet/kubeconfig"
 
-# Also copy to the path expected by controller manager
-cp $HOME/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp $HOME/.kube/config ./var/lib/kubelet/kubeconfig
-export KUBECONFIG=~/.kube/config
+export KUBECONFIG="$HOME/.kube/config"
 
 # Build bootstrap kubeconfig for kubelet (absolute paths)
-$KUBEBUILDER_DIR/bin/kubectl config set-cluster manual --server=https://127.0.0.1:6443 --insecure-skip-tls-verify=true --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
-$KUBEBUILDER_DIR/bin/kubectl config set-credentials kubelet-bootstrap --token=$TOKEN --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
-$KUBEBUILDER_DIR/bin/kubectl config set-context bootstrap --cluster=manual --user=kubelet-bootstrap --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
-$KUBEBUILDER_DIR/bin/kubectl config use-context bootstrap --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+"$KUBEBUILDER_DIR/bin/kubectl" config set-cluster manual --server=https://127.0.0.1:6443 --insecure-skip-tls-verify=true --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+"$KUBEBUILDER_DIR/bin/kubectl" config set-credentials kubelet-bootstrap --token="$TOKEN" --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+"$KUBEBUILDER_DIR/bin/kubectl" config set-context bootstrap --cluster=manual --user=kubelet-bootstrap --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
+"$KUBEBUILDER_DIR/bin/kubectl" config use-context bootstrap --kubeconfig="$KUBELET_DIR_ABS/bootstrap-kubeconfig"
 
-# Create service account and configmap (ignore if already exists)
-$KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "Service account may already exist"
-$KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "ConfigMap may already exist"
+# Ensure default SA and root CA configmap exist (idempotent)
+"$KUBEBUILDER_DIR/bin/kubectl" create sa default --dry-run=client -o yaml | "$KUBEBUILDER_DIR/bin/kubectl" apply -f - || true
+"$KUBEBUILDER_DIR/bin/kubectl" create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default --dry-run=client -o yaml | "$KUBEBUILDER_DIR/bin/kubectl" apply -f - || true
 
+# -----------------------------------------------------------------------------
+# Start kubelet (needs UID 0 typically). Use sudo if available.
+# -----------------------------------------------------------------------------
 echo "Starting kubelet..."
-# Ensure all necessary files exist
-cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 # Remove any stale kubelet client kubeconfig to force regeneration with absolute paths
-rm -f "${KUBELET_DIR_ABS}/kubeconfig"
-# Remove any stale kubelet client kubeconfig to force regeneration with absolute paths
-rm -f "${KUBELET_DIR_ABS}/kubeconfig"
+rm -f "${KUBELET_DIR_ABS}/kubeconfig" || true
 
 if command -v sudo >/dev/null 2>&1; then
   sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
-    --kubeconfig=$KUBELET_DIR_ABS/kubeconfig \
-    --config=$KUBELET_DIR_ABS/config.yaml \
-    --root-dir=$KUBELET_DIR_ABS \
-    --cert-dir=$KUBELET_DIR_ABS/pki \
+    --kubeconfig=${KUBELET_DIR_ABS}/kubeconfig \
+    --config=${KUBELET_DIR_ABS}/config.yaml \
+    --root-dir=${KUBELET_DIR_ABS} \
+    --cert-dir=${KUBELET_DIR_ABS}/pki \
     --hostname-override=$(hostname) \
     --pod-infra-container-image=registry.k8s.io/pause:3.10 \
     --node-ip=$HOST_IP \
     --cloud-provider=external \
     --cgroup-driver=cgroupfs \
-    --max-pods=4  \
+    --max-pods=4 \
     --v=2 \
-    --bootstrap-kubeconfig=$KUBELET_DIR_ABS/bootstrap-kubeconfig \
-    >> $LOG_DIR/kubelet.log 2>&1 & echo \$! > /tmp/kubelet.pid"
+    --bootstrap-kubeconfig=${KUBELET_DIR_ABS}/bootstrap-kubeconfig \
+    >> ${LOG_DIR}/kubelet.log 2>&1 & echo \$! > /tmp/kubelet.pid"
 else
-  $KUBEBUILDER_DIR/bin/kubelet \
-    --kubeconfig=$KUBELET_DIR_ABS/kubeconfig \
-    --config=$KUBELET_DIR_ABS/config.yaml \
-    --root-dir=$KUBELET_DIR_ABS \
-    --cert-dir=$KUBELET_DIR_ABS/pki \
-    --hostname-override=$(hostname) \
+  echo "WARNING: sudo not available; kubelet may fail (needs UID 0)."
+  "$KUBEBUILDER_DIR/bin/kubelet" \
+    --kubeconfig="${KUBELET_DIR_ABS}/kubeconfig" \
+    --config="${KUBELET_DIR_ABS}/config.yaml" \
+    --root-dir="${KUBELET_DIR_ABS}" \
+    --cert-dir="${KUBELET_DIR_ABS}/pki" \
+    --hostname-override="$(hostname)" \
     --pod-infra-container-image=registry.k8s.io/pause:3.10 \
-    --node-ip=$HOST_IP \
+    --node-ip="$HOST_IP" \
     --cloud-provider=external \
     --cgroup-driver=cgroupfs \
-    --max-pods=4  \
+    --max-pods=4 \
     --v=2 \
-    --bootstrap-kubeconfig=$KUBELET_DIR_ABS/bootstrap-kubeconfig \
-    >> $LOG_DIR/kubelet.log 2>&1 & echo $! > /tmp/kubelet.pid
+    --bootstrap-kubeconfig="${KUBELET_DIR_ABS}/bootstrap-kubeconfig" \
+    >> "${LOG_DIR}/kubelet.log" 2>&1 & echo $! > /tmp/kubelet.pid
 fi
 
 echo "Waiting for kubelet to register..."
@@ -413,19 +390,21 @@ sleep 5
 # Fix relative paths in kubelet kubeconfig if present (prefix with absolute dir)
 for i in {1..15}; do
   if [ -f "${KUBELET_DIR_ABS}/kubeconfig" ]; then
-    sed -i -E "s#client-certificate: (\.?/)?var/lib/kubelet#client-certificate: ${KUBELET_DIR_ABS}#g" "${KUBELET_DIR_ABS}/kubeconfig" || true
-    sed -i -E "s#client-key: (\.?/)?var/lib/kubelet#client-key: ${KUBELET_DIR_ABS}#g" "${KUBELET_DIR_ABS}/kubeconfig" || true
+    sed -i -E "s#client-certificate:[[:space:]]+(\.?/)?var/lib/kubelet#client-certificate: ${KUBELET_DIR_ABS}#g" "${KUBELET_DIR_ABS}/kubeconfig" || true
+    sed -i -E "s#client-key:[[:space:]]+(\.?/)?var/lib/kubelet#client-key: ${KUBELET_DIR_ABS}#g" "${KUBELET_DIR_ABS}/kubeconfig" || true
     break
   fi
   sleep 1
 done
 
+# -----------------------------------------------------------------------------
+# Label node (after registration)
+# -----------------------------------------------------------------------------
 echo "Labeling node..."
-NODE_NAME=$(hostname)
-# Wait for node to be registered
-TIMEOUT=30
+NODE_NAME="$(hostname)"
+TIMEOUT=60
 COUNT=0
-while ! $KUBEBUILDER_DIR/bin/kubectl get nodes "$NODE_NAME" &>/dev/null; do
+while ! "$KUBEBUILDER_DIR/bin/kubectl" get nodes "$NODE_NAME" >/dev/null 2>&1; do
   if [ $COUNT -ge $TIMEOUT ]; then
     echo "Timeout waiting for node $NODE_NAME to register"
     break
@@ -433,34 +412,36 @@ while ! $KUBEBUILDER_DIR/bin/kubectl get nodes "$NODE_NAME" &>/dev/null; do
   sleep 2
   COUNT=$((COUNT + 2))
 done
-$KUBEBUILDER_DIR/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite 2>/dev/null || echo "Node labeling failed, continuing..."
+"$KUBEBUILDER_DIR/bin/kubectl" label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite 2>/dev/null || echo "Node labeling skipped/failed (node not present yet)"
 
+# -----------------------------------------------------------------------------
+# Start kube-controller-manager (with CSR signing enabled)
+# -----------------------------------------------------------------------------
 echo "Starting kube-controller-manager..."
-# Ensure kubeconfig exists at both locations
-cp $HOME/.kube/config $KUBELET_DIR/kubeconfig 2>/dev/null || echo "Kubeconfig copy may fail, but continuing..."
-
-PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
-    --kubeconfig=$KUBELET_DIR/kubeconfig \
-    --leader-elect=false \
-    --cloud-provider=external \
-    --service-cluster-ip-range=10.0.0.0/24 \
-    --cluster-name=kubernetes \
-    --root-ca-file=$KUBELET_DIR/ca.crt \
-    --service-account-private-key-file=/tmp/sa.key \
-    --use-service-account-credentials=true \
-    --cluster-signing-cert-file=/tmp/ca.crt \
-    --cluster-signing-key-file=/tmp/ca.key \
-    --v=2 >> $LOG_DIR/kube-controller-manager.log 2>&1 &
+"$KUBEBUILDER_DIR/bin/kube-controller-manager" \
+  --kubeconfig="$KUBELET_DIR/kubeconfig" \
+  --leader-elect=false \
+  --cloud-provider=external \
+  --service-cluster-ip-range=10.0.0.0/24 \
+  --cluster-name=kubernetes \
+  --root-ca-file="$KUBELET_DIR/ca.crt" \
+  --service-account-private-key-file=/tmp/sa.key \
+  --use-service-account-credentials=true \
+  --cluster-signing-cert-file=/tmp/ca.crt \
+  --cluster-signing-key-file=/tmp/ca.key \
+  --v=2 >> "$LOG_DIR/kube-controller-manager.log" 2>&1 &
 echo $! > /tmp/controller-manager.pid
 
+# -----------------------------------------------------------------------------
+# Done
+# -----------------------------------------------------------------------------
 echo "=== Setup Complete ==="
-echo "All components started successfully!"
+echo "All components started."
 echo ""
 echo "Verification commands:"
 echo "kubectl get nodes"
 echo "kubectl get componentstatuses"
 echo "kubectl get --raw='/readyz?verbose'"
-echo "kubectl create deploy demo --image nginx"
+echo "kubectl apply -f k8s/demo-deploy.yaml"
 echo ""
-echo "Check status with: ./scripts/status.sh"
 echo "Stop all with: ./scripts/stop-all.sh"
