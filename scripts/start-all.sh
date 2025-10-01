@@ -167,8 +167,8 @@ version = 3
   disable_snapshot_annotations = true
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
-  bin_dir = "$CNI_BIN"
-  conf_dir = "$CNI_CONF_DIR"
+  bin_dir = "./opt/cni/bin"
+  conf_dir = "./etc/cni/net.d"
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
