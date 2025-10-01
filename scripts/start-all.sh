@@ -82,6 +82,7 @@ fi
 if [ ! -f "$CNI_BIN/containerd" ]; then
     echo "Downloading containerd..."
     wget https://github.com/containerd/containerd/releases/download/v2.0.5/containerd-static-2.0.5-linux-amd64.tar.gz -O /tmp/containerd.tar.gz
+    mkdir -p ./opt/cni
     tar zxf /tmp/containerd.tar.gz -C ./opt/cni/
     rm /tmp/containerd.tar.gz
 fi
