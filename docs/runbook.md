@@ -161,9 +161,9 @@ apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
   anonymous:
-    enabled: true
+    enabled: false
   webhook:
-    enabled: true
+    enabled: false
   x509:
     clientCAFile: "/tmp/ca.crt"
 authorization:
@@ -251,8 +251,11 @@ echo $! > /tmp/scheduler.pid
 
 **Prepare kubelet prerequisites:**
 ```bash
-# Copy kubeconfig
-cp /root/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp /root/.kube/config ./var/lib/kubelet/kubeconfig
+# Copy kubeconfig for kubelet
+cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
+
+# Also copy to the path expected by controller manager
+cp $HOME/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp $HOME/.kube/config ./var/lib/kubelet/kubeconfig
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 
@@ -277,7 +280,8 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --cloud-provider=external \
     --cgroup-driver=cgroupfs \
     --max-pods=4  \
-    --v=1 &
+    --v=2 \
+    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig &
 echo $! > /tmp/kubelet.pid
 ```
 

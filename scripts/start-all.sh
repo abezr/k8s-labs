@@ -122,6 +122,9 @@ $KUBEBUILDER_DIR/bin/kubectl config set-cluster test-env --server=https://127.0.
 $KUBEBUILDER_DIR/bin/kubectl config set-context test-context --cluster=test-env --user=test-user --namespace=default
 $KUBEBUILDER_DIR/bin/kubectl config use-context test-context
 
+# Set KUBECONFIG for kubelet
+export KUBECONFIG=$HOME/.kube/config
+
 # 5. Create configuration files
 echo "Creating configuration files..."
 
@@ -188,9 +191,9 @@ apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
   anonymous:
-    enabled: true
+    enabled: false
   webhook:
-    enabled: true
+    enabled: false
   x509:
     clientCAFile: "/tmp/ca.crt"
 authorization:
@@ -276,8 +279,11 @@ $KUBEBUILDER_DIR/bin/kube-scheduler \
 echo $! > /tmp/scheduler.pid
 
 echo "Preparing kubelet prerequisites..."
-# Copy kubeconfig
+# Copy kubeconfig for kubelet
 cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
+
+# Also copy to the path expected by controller manager
+cp $HOME/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp $HOME/.kube/config ./var/lib/kubelet/kubeconfig
 export KUBECONFIG=~/.kube/config
 cp /tmp/sa.pub /tmp/ca.crt
 
@@ -286,6 +292,9 @@ $KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEB
 $KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.crt=/tmp/ca.crt -n default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "ConfigMap may already exist"
 
 echo "Starting kubelet..."
+# Ensure all necessary files exist
+cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
+
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --config=$KUBELET_DIR/config.yaml \
@@ -297,7 +306,8 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --cloud-provider=external \
     --cgroup-driver=cgroupfs \
     --max-pods=4  \
-    --v=1 &
+    --v=2 \
+    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig &
 echo $! > /tmp/kubelet.pid
 
 echo "Waiting for kubelet to register..."
@@ -319,6 +329,9 @@ done
 $KUBEBUILDER_DIR/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite 2>/dev/null || echo "Node labeling failed, continuing..."
 
 echo "Starting kube-controller-manager..."
+# Ensure kubeconfig exists at both locations
+cp $HOME/.kube/config $KUBELET_DIR/kubeconfig 2>/dev/null || echo "Kubeconfig copy may fail, but continuing..."
+
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --leader-elect=false \
