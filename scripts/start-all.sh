@@ -303,9 +303,13 @@ if [ -z "$CONTAINERD_BIN" ]; then
   exit 1
 fi
 
-# Start containerd without sudo (local paths)
-PATH="$PATH:/opt/cni/bin:/usr/sbin" "$CONTAINERD_BIN" --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" >> "$LOG_DIR/containerd.log" 2>&1 &
-echo $! > /tmp/containerd.pid
+# Start containerd (needs root for socket ownership/chown on ttrpc)
+if command -v sudo >/dev/null 2>&1; then
+  sudo -E bash -c 'PATH="$PATH:/opt/cni/bin:/usr/sbin" "'"$CONTAINERD_BIN"'" --config "'"$CONTAINERD_CONFIG"'" --root "'"$CONTAINERD_ROOT"'" >> "'"$LOG_DIR"'/containerd.log" 2>&1 & echo $! > /tmp/containerd.pid'
+else
+  echo "ERROR: containerd must run as root to manage socket ownership (ttrpc chown). Install sudo or run this script as root."
+  exit 1
+fi
 
 echo "Waiting for containerd socket: $CONTAINERD_SOCK_ABS ..."
 for i in {1..15}; do
