@@ -92,7 +92,6 @@ openssl req -x509 -new -nodes -key /tmp/ca.key -subj "/CN=kubelet-ca" -days 365 
 # Copy to system location or local if permission denied
 cp /tmp/ca.crt /var/lib/kubelet/ca.crt 2>/dev/null || cp /tmp/ca.crt ./var/lib/kubelet/ca.crt
 cp /tmp/ca.crt /var/lib/kubelet/pki/ca.crt 2>/dev/null || cp /tmp/ca.crt ./var/lib/kubelet/pki/ca.crt
-cp /tmp/ca.crt /tmp/ca.crt  # Also copy to /tmp for kubelet config
 ```
 
 ## 4. Configure kubectl

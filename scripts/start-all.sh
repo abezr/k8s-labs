@@ -113,7 +113,6 @@ openssl genrsa -out /tmp/ca.key 2048
 openssl req -x509 -new -nodes -key /tmp/ca.key -subj "/CN=kubelet-ca" -days 365 -out /tmp/ca.crt
 cp /tmp/ca.crt "$KUBELET_DIR/ca.crt"
 cp /tmp/ca.crt "$KUBELET_DIR/pki/ca.crt"
-cp /tmp/ca.crt /tmp/ca.crt  # Also copy to /tmp for kubelet config
 
 # 4. Configure kubectl
 echo "Configuring kubectl..."
