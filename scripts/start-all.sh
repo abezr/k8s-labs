@@ -63,17 +63,33 @@ else
 fi
 KUBE_MANIFESTS_DIR_ABS="$(cd "$KUBE_MANIFESTS_DIR" && pwd)"
 
-# Containerd runtime/root directories and socket (always use local to avoid root)
+# Containerd runtime/root directories and socket (use /run for socket with sudo)
 CONTAINERD_ROOT="./var/lib/containerd"
-CONTAINERD_STATE="./run/containerd"
-CONTAINERD_SOCK_ABS="$WORKDIR/run/containerd/containerd.sock"
+CONTAINERD_STATE="/run/containerd"
+CONTAINERD_SOCK_ABS="/run/containerd/containerd.sock"
 
 # Log directory
 LOG_DIR="/var/log/kubernetes"
 [ ! -w "/var/log/kubernetes" ] && LOG_DIR="./var/log/kubernetes"
 
 # Ensure dirs exist
-mkdir -p "$CONTAINERD_ROOT" "$CONTAINERD_STATE" "$LOG_DIR"
+mkdir -p "$CONTAINERD_ROOT" "$LOG_DIR"
+# Ensure containerd state dir under /run exists (may require sudo)
+if ! mkdir -p "$CONTAINERD_STATE" 2>/dev/null; then
+  if command -v sudo >/dev/null 2>&1; then
+    sudo mkdir -p "$CONTAINERD_STATE"
+  else
+    echo "ERROR: cannot create $CONTAINERD_STATE and sudo is unavailable"
+    exit 1
+  fi
+fi
+# Relax permissions to avoid chown errors from containerd on ttrpc sockets
+if command -v sudo >/dev/null 2>&1; then
+  sudo chmod 0777 "$CONTAINERD_STATE" || true
+fi
+chmod 0777 "$CONTAINERD_STATE" || true
+# Provide a local symlink to the system state dir so any legacy paths under ./run/containerd resolve
+ln -sfn /run/containerd ./run/containerd 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # 2. Download components if not present
@@ -184,7 +200,7 @@ EOF
 cat > "$CONTAINERD_CONFIG" <<EOF
 version = 3
 root = "${WORKDIR}/var/lib/containerd"
-state = "${WORKDIR}/run/containerd"
+state = "/run/containerd"
 
 [grpc]
   address = "${CONTAINERD_SOCK_ABS}"
@@ -238,7 +254,7 @@ runtimeRequestTimeout: "15m"
 failSwapOn: false
 seccompDefault: true
 serverTLSBootstrap: false
-containerRuntimeEndpoint: "unix://${CONTAINERD_SOCK_ABS}"
+containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
 staticPodPath: "${KUBE_MANIFESTS_DIR_ABS}"
 EOF
 
@@ -291,24 +307,28 @@ echo "Waiting for API server to start..."
 sleep 5
 
 echo "Starting containerd (local static preferred)..."
-# Prefer local static containerd (v2.0.5). Fallback to system containerd if local missing.
-CONTAINERD_BIN=""
-if [ -x "$CNI_BIN_ABS/containerd" ]; then
-  CONTAINERD_BIN="$CNI_BIN_ABS/containerd"
+if [ -S /run/containerd/containerd.sock ]; then
+  echo "Using system containerd at /run/containerd/containerd.sock"
 else
-  CONTAINERD_BIN="$(command -v containerd || true)"
-fi
-if [ -z "$CONTAINERD_BIN" ]; then
-  echo "ERROR: containerd binary not found (checked $CNI_BIN_ABS/containerd and system PATH)"
-  exit 1
-fi
+  # Prefer local static containerd (v2.0.5). Fallback to system containerd if local missing.
+  CONTAINERD_BIN=""
+  if [ -x "$CNI_BIN_ABS/containerd" ]; then
+    CONTAINERD_BIN="$CNI_BIN_ABS/containerd"
+  else
+    CONTAINERD_BIN="$(command -v containerd || true)"
+  fi
+  if [ -z "$CONTAINERD_BIN" ]; then
+    echo "ERROR: containerd binary not found (checked $CNI_BIN_ABS/containerd and system PATH)"
+    exit 1
+  fi
 
-# Start containerd (needs root for socket ownership/chown on ttrpc)
-if command -v sudo >/dev/null 2>&1; then
-  sudo -E bash -c 'PATH="$PATH:/opt/cni/bin:/usr/sbin" "'"$CONTAINERD_BIN"'" --config "'"$CONTAINERD_CONFIG"'" --root "'"$CONTAINERD_ROOT"'" >> "'"$LOG_DIR"'/containerd.log" 2>&1 & echo $! > /tmp/containerd.pid'
-else
-  echo "ERROR: containerd must run as root to manage socket ownership (ttrpc chown). Install sudo or run this script as root."
-  exit 1
+  # Start containerd (needs root for socket ownership/chown on ttrpc)
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -E bash -c 'PATH="$PATH:/opt/cni/bin:/usr/sbin" "'"$CONTAINERD_BIN"'" --config "'"$CONTAINERD_CONFIG"'" --root "'"$CONTAINERD_ROOT"'" --state "'"$CONTAINERD_STATE"'" >> "'"$LOG_DIR"'/containerd.log" 2>&1 & echo $! > /tmp/containerd.pid'
+  else
+    echo "ERROR: containerd must run as root to manage socket ownership (ttrpc chown). Install sudo or run this script as root."
+    exit 1
+  fi
 fi
 
 echo "Waiting for containerd socket: $CONTAINERD_SOCK_ABS ..."
@@ -353,8 +373,8 @@ export KUBECONFIG="$HOME/.kube/config"
 # Start kubelet (needs UID 0 typically). Use sudo if available.
 # -----------------------------------------------------------------------------
 echo "Starting kubelet..."
-# Remove any stale kubelet client kubeconfig to force regeneration with absolute paths
-rm -f "${KUBELET_DIR_ABS}/kubeconfig" || true
+# Keep admin kubeconfig for other components (controller-manager); kubelet uses bootstrap-kubeconfig
+# rm -f "${KUBELET_DIR_ABS}/kubeconfig" || true
 
 if command -v sudo >/dev/null 2>&1; then
   sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
@@ -422,8 +442,10 @@ done
 # Start kube-controller-manager (with CSR signing enabled)
 # -----------------------------------------------------------------------------
 echo "Starting kube-controller-manager..."
+# Use admin kubeconfig (not kubelet's) to avoid accidental deletion by kubelet bootstrap flows
+CM_KUBECONFIG="$HOME/.kube/config"
 "$KUBEBUILDER_DIR/bin/kube-controller-manager" \
-  --kubeconfig="$KUBELET_DIR/kubeconfig" \
+  --kubeconfig="$CM_KUBECONFIG" \
   --leader-elect=false \
   --cloud-provider=external \
   --service-cluster-ip-range=10.0.0.0/24 \
