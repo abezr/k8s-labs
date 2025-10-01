@@ -132,7 +132,7 @@ version = 3
   address = "/run/containerd/containerd.sock"
 
 [state]
-  run = "./run/containerd"
+  run = "/run/containerd"
 
 [plugins.'io.containerd.cri.v1.runtime']
   enable_selinux = false
@@ -209,6 +209,7 @@ $KUBEBUILDER_DIR/bin/kube-apiserver \
     --advertise-address=$HOST_IP \
     --authorization-mode=AlwaysAllow \
     --token-auth-file=/tmp/token.csv \
+    --client-ca-file=/tmp/ca.crt \
     --enable-priority-and-fairness=false \
     --allow-privileged=true \
     --profiling=false \
@@ -257,7 +258,6 @@ cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 # Also copy to the path expected by controller manager
 cp $HOME/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp $HOME/.kube/config ./var/lib/kubelet/kubeconfig
 export KUBECONFIG=~/.kube/config
-cp /tmp/sa.pub /tmp/ca.crt
 
 # Create service account and configmap (ignore if already exists)
 $KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "Service account may already exist"
@@ -269,7 +269,7 @@ $KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.cr
 # Use system paths or local paths if permission denied
 KUBELET_DIR="/var/lib/kubelet"
 [ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
-PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
+sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --config=$KUBELET_DIR/config.yaml \
     --root-dir=$KUBELET_DIR \
@@ -281,8 +281,8 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --cgroup-driver=cgroupfs \
     --max-pods=4  \
     --v=2 \
-    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig &
-echo $! > /tmp/kubelet.pid
+    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig \
+    & echo \$! > /tmp/kubelet.pid"
 ```
 
 **Label the node:**
@@ -305,6 +305,8 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
     --root-ca-file=$KUBELET_DIR/ca.crt \
     --service-account-private-key-file=/tmp/sa.key \
     --use-service-account-credentials=true \
+    --cluster-signing-cert-file=/tmp/ca.crt \
+    --cluster-signing-key-file=/tmp/ca.key \
     --v=2 &
 echo $! > /tmp/controller-manager.pid
 ```

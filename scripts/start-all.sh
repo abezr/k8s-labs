@@ -152,10 +152,10 @@ cat > "$CONTAINERD_CONFIG" <<EOF
 version = 3
 
 [grpc]
-  address = "./run/containerd/containerd.sock"
+  address = "/run/containerd/containerd.sock"
 
 [state]
-  run = "./run/containerd"
+  run = "/run/containerd"
 
 [plugins.'io.containerd.grpc.v1.cri']
   sandbox_image = "registry.k8s.io/pause:3.10"
@@ -171,8 +171,8 @@ version = 3
   disable_snapshot_annotations = true
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
-  bin_dir = "./opt/cni/bin"
-  conf_dir = "./etc/cni/net.d"
+  bin_dir = "/opt/cni/bin"
+  conf_dir = "/etc/cni/net.d"
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
@@ -240,6 +240,7 @@ $KUBEBUILDER_DIR/bin/kube-apiserver \
     --advertise-address=$HOST_IP \
     --authorization-mode=AlwaysAllow \
     --token-auth-file=/tmp/token.csv \
+    --client-ca-file=/tmp/ca.crt \
     --enable-priority-and-fairness=false \
     --allow-privileged=true \
     --profiling=false \
@@ -285,7 +286,6 @@ cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 # Also copy to the path expected by controller manager
 cp $HOME/.kube/config /var/lib/kubelet/kubeconfig 2>/dev/null || cp $HOME/.kube/config ./var/lib/kubelet/kubeconfig
 export KUBECONFIG=~/.kube/config
-cp /tmp/sa.pub /tmp/ca.crt
 
 # Create service account and configmap (ignore if already exists)
 $KUBEBUILDER_DIR/bin/kubectl create sa default --dry-run=client -o yaml | $KUBEBUILDER_DIR/bin/kubectl apply -f - || echo "Service account may already exist"
@@ -295,7 +295,7 @@ echo "Starting kubelet..."
 # Ensure all necessary files exist
 cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 
-PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
+sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --config=$KUBELET_DIR/config.yaml \
     --root-dir=$KUBELET_DIR \
@@ -307,8 +307,8 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kubelet \
     --cgroup-driver=cgroupfs \
     --max-pods=4  \
     --v=2 \
-    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig &
-echo $! > /tmp/kubelet.pid
+    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig \
+    & echo \$! > /tmp/kubelet.pid"
 
 echo "Waiting for kubelet to register..."
 sleep 5
@@ -341,6 +341,8 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
     --root-ca-file=$KUBELET_DIR/ca.crt \
     --service-account-private-key-file=/tmp/sa.key \
     --use-service-account-credentials=true \
+    --cluster-signing-cert-file=/tmp/ca.crt \
+    --cluster-signing-key-file=/tmp/ca.key \
     --v=2 &
 echo $! > /tmp/controller-manager.pid
 
