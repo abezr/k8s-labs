@@ -67,6 +67,26 @@ else
   CONTAINERD_STATE="$(pwd)/run/containerd"
 fi
 
+# Compute absolute paths to avoid duplicate relative segments in generated files
+CNI_BIN_ABS="$(cd "$CNI_BIN" && pwd)"
+CNI_CONF_DIR_ABS="$(cd "$CNI_CONF_DIR" && pwd)"
+KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
+if [ -d "/etc/kubernetes/manifests" ]; then
+  KUBE_MANIFESTS_DIR="/etc/kubernetes/manifests"
+else
+  KUBE_MANIFESTS_DIR="./etc/kubernetes/manifests"
+fi
+KUBE_MANIFESTS_DIR_ABS="$(cd "$KUBE_MANIFESTS_DIR" && pwd)"
+
+# Choose containerd socket/state paths based on permissions
+if [ -w "/run" ]; then
+  CONTAINERD_SOCK="/run/containerd/containerd.sock"
+  CONTAINERD_STATE="/run/containerd"
+else
+  CONTAINERD_SOCK="$(pwd)/run/containerd/containerd.sock"
+  CONTAINERD_STATE="$(pwd)/run/containerd"
+fi
+
 # Compute absolute kubelet dir to avoid duplicate relative paths in kubeconfig
 KUBELET_DIR_ABS="$(cd "$KUBELET_DIR" && pwd)"
 
@@ -292,18 +312,34 @@ mkdir -p ./run/containerd
 # Set containerd runtime state directory
 export CONTAINERD_ROOT="./var/lib/containerd"
 export CONTAINERD_STATE_DIR="./run/containerd"
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" >> $LOG_DIR/containerd.log 2>&1 &
-echo $! > /tmp/containerd.pid
+
+# Resolve containerd binary path (prefer system containerd, fallback to ./opt/cni/bin if present)
+CONTAINERD_BIN="$(command -v containerd || true)"
+if [ -z "$CONTAINERD_BIN" ] && [ -x "./opt/cni/bin/containerd" ]; then
+  CONTAINERD_BIN="./opt/cni/bin/containerd"
+fi
+if [ -z "$CONTAINERD_BIN" ]; then
+  echo "ERROR: containerd binary not found (looked for system containerd and ./opt/cni/bin/containerd)"
+  exit 1
+fi
+
+# Start containerd, using sudo only if targeting /run and sudo is available
+if command -v sudo >/dev/null 2>&1 && [ "${CONTAINERD_SOCK}" = "/run/containerd/containerd.sock" ]; then
+  sudo -E bash -c "PATH=\$PATH:/opt/cni/bin:/usr/sbin \"$CONTAINERD_BIN\" --config '$CONTAINERD_CONFIG' --root '$CONTAINERD_ROOT' >> '$LOG_DIR/containerd.log' 2>&1 & echo \$! > /tmp/containerd.pid"
+else
+  PATH=$PATH:/opt/cni/bin:/usr/sbin "$CONTAINERD_BIN" --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" >> "$LOG_DIR/containerd.log" 2>&1 &
+  echo $! > /tmp/containerd.pid
+fi
 
 echo "Waiting for containerd to start..."
 # Wait up to ~10s for socket
 for i in {1..10}; do
-  [ -S /run/containerd/containerd.sock ] && break
+  [ -S "${CONTAINERD_SOCK}" ] && break
   sleep 1
 done
-if [ ! -S /run/containerd/containerd.sock ]; then
-  echo "WARNING: containerd socket not found at /run/containerd/containerd.sock"
-  tail -n 50 "$LOG_DIR/containerd.log" || true
+if [ ! -S "${CONTAINERD_SOCK}" ]; then
+  echo "WARNING: containerd socket not found at ${CONTAINERD_SOCK}"
+  tail -n 100 "$LOG_DIR/containerd.log" || true
 fi
 
 echo "Starting kube-scheduler..."
@@ -335,6 +371,8 @@ $KUBEBUILDER_DIR/bin/kubectl create configmap kube-root-ca.crt --from-file=ca.cr
 echo "Starting kubelet..."
 # Ensure all necessary files exist
 cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
+# Remove any stale kubelet client kubeconfig to force regeneration with absolute paths
+rm -f "${KUBELET_DIR_ABS}/kubeconfig"
 # Remove any stale kubelet client kubeconfig to force regeneration with absolute paths
 rm -f "${KUBELET_DIR_ABS}/kubeconfig"
 
@@ -372,6 +410,15 @@ fi
 
 echo "Waiting for kubelet to register..."
 sleep 5
+# Fix relative paths in kubelet kubeconfig if present (prefix with absolute dir)
+for i in {1..15}; do
+  if [ -f "${KUBELET_DIR_ABS}/kubeconfig" ]; then
+    sed -i -E "s#client-certificate: (\.?/)?var/lib/kubelet#client-certificate: ${KUBELET_DIR_ABS}#g" "${KUBELET_DIR_ABS}/kubeconfig" || true
+    sed -i -E "s#client-key: (\.?/)?var/lib/kubelet#client-key: ${KUBELET_DIR_ABS}#g" "${KUBELET_DIR_ABS}/kubeconfig" || true
+    break
+  fi
+  sleep 1
+done
 
 echo "Labeling node..."
 NODE_NAME=$(hostname)
