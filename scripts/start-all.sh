@@ -7,7 +7,7 @@ set -e  # Exit on any error
 
 # Configuration
 KUBEBUILDER_DIR="./kubebuilder"
-CNI_BIN="/opt/cni/bin"
+CNI_BIN="./opt/cni/bin"
 HOST_IP=$(hostname -I | awk '{print $1}')
 TOKEN="1234567890"
 
@@ -79,25 +79,25 @@ if [ ! -f "$KUBEBUILDER_DIR/bin/kube-controller-manager" ]; then
 fi
 
 # containerd
-if [ ! -f "/opt/cni/bin/containerd" ]; then
+if [ ! -f "$CNI_BIN/containerd" ]; then
     echo "Downloading containerd..."
     wget https://github.com/containerd/containerd/releases/download/v2.0.5/containerd-static-2.0.5-linux-amd64.tar.gz -O /tmp/containerd.tar.gz
-    tar zxf /tmp/containerd.tar.gz -C /opt/cni/
+    tar zxf /tmp/containerd.tar.gz -C $CNI_BIN/
     rm /tmp/containerd.tar.gz
 fi
 
 # runc
-if [ ! -f "/opt/cni/bin/runc" ]; then
+if [ ! -f "$CNI_BIN/runc" ]; then
     echo "Downloading runc..."
-    curl -L "https://github.com/opencontainers/runc/releases/download/v1.2.6/runc.amd64" -o /opt/cni/bin/runc
-    chmod +x /opt/cni/bin/runc
+    curl -L "https://github.com/opencontainers/runc/releases/download/v1.2.6/runc.amd64" -o $CNI_BIN/runc
+    chmod +x $CNI_BIN/runc
 fi
 
 # CNI plugins
-if [ ! -f "/opt/cni/bin/bridge" ]; then
+if [ ! -f "$CNI_BIN/bridge" ]; then
     echo "Downloading CNI plugins..."
     wget https://github.com/containernetworking/plugins/releases/download/v1.6.2/cni-plugins-linux-amd64-v1.6.2.tgz -O /tmp/cni-plugins.tgz
-    tar zxf /tmp/cni-plugins.tgz -C /opt/cni/bin/
+    tar zxf /tmp/cni-plugins.tgz -C $CNI_BIN/
     rm /tmp/cni-plugins.tgz
 fi
 
@@ -148,7 +148,7 @@ cat > "$CONTAINERD_CONFIG" <<EOF
 version = 3
 
 [grpc]
-  address = "/run/containerd/containerd.sock"
+  address = "./run/containerd/containerd.sock"
 
 [state]
   run = "./run/containerd"
@@ -167,7 +167,7 @@ version = 3
   disable_snapshot_annotations = true
 
 [plugins.'io.containerd.cri.v1.runtime'.cni]
-  bin_dir = "/opt/cni/bin"
+  bin_dir = "$CNI_BIN"
   conf_dir = "$CNI_CONF_DIR"
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
@@ -191,7 +191,7 @@ authentication:
   webhook:
     enabled: true
   x509:
-    clientCAFile: "./var/lib/kubelet/ca.crt"
+    clientCAFile: "ca.crt"
 authorization:
   mode: AlwaysAllow
 clusterDomain: "cluster.local"
@@ -202,8 +202,8 @@ runtimeRequestTimeout: "15m"
 failSwapOn: false
 seccompDefault: true
 serverTLSBootstrap: false
-containerRuntimeEndpoint: "unix:///run/containerd/containerd.sock"
-staticPodPath: "/etc/kubernetes/manifests"
+containerRuntimeEndpoint: "unix://./run/containerd/containerd.sock"
+staticPodPath: "./etc/kubernetes/manifests"
 EOF
 
 # 6. Start components in order
@@ -304,7 +304,18 @@ sleep 5
 
 echo "Labeling node..."
 NODE_NAME=$(hostname)
-$KUBEBUILDER_DIR/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite
+# Wait for node to be registered
+TIMEOUT=30
+COUNT=0
+while ! $KUBEBUILDER_DIR/bin/kubectl get nodes "$NODE_NAME" &>/dev/null; do
+  if [ $COUNT -ge $TIMEOUT ]; then
+    echo "Timeout waiting for node $NODE_NAME to register"
+    break
+  fi
+  sleep 2
+  COUNT=$((COUNT + 2))
+done
+$KUBEBUILDER_DIR/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite 2>/dev/null || echo "Node labeling failed, continuing..."
 
 echo "Starting kube-controller-manager..."
 PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
