@@ -47,6 +47,10 @@ CONTAINERD_CONFIG="/etc/containerd/config.toml"
 [ ! -w "/var/lib/kubelet" ] && KUBELET_DIR="./var/lib/kubelet"
 [ ! -w "/etc/containerd" ] && CONTAINERD_CONFIG="./etc/containerd/config.toml"
 
+# Select log directory
+LOG_DIR="/var/log/kubernetes"
+[ ! -w "/var/log/kubernetes" ] && LOG_DIR="./var/log/kubernetes"
+
 # 2. Download components if they don't exist
 echo "Checking and downloading components..."
 
@@ -222,7 +226,7 @@ $KUBEBUILDER_DIR/bin/etcd \
     --initial-cluster default=http://$HOST_IP:2380 \
     --initial-advertise-peer-urls http://$HOST_IP:2380 \
     --initial-cluster-state new \
-    --initial-cluster-token test-token &
+    --initial-cluster-token test-token >> $LOG_DIR/etcd.log 2>&1 &
 echo $! > /tmp/etcd.pid
 
 echo "Waiting for etcd to start..."
@@ -265,7 +269,7 @@ mkdir -p ./run/containerd
 # Set containerd runtime state directory
 export CONTAINERD_ROOT="./var/lib/containerd"
 export CONTAINERD_STATE_DIR="./run/containerd"
-PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" &
+PATH=$PATH:/opt/cni/bin:/usr/sbin /opt/cni/bin/containerd --config "$CONTAINERD_CONFIG" --root "$CONTAINERD_ROOT" >> $LOG_DIR/containerd.log 2>&1 &
 echo $! > /tmp/containerd.pid
 
 echo "Waiting for containerd to start..."
@@ -276,7 +280,7 @@ $KUBEBUILDER_DIR/bin/kube-scheduler \
     --kubeconfig=$HOME/.kube/config \
     --leader-elect=false \
     --v=2 \
-    --bind-address=0.0.0.0 &
+    --bind-address=0.0.0.0 >> $LOG_DIR/kube-scheduler.log 2>&1 &
 echo $! > /tmp/scheduler.pid
 
 echo "Preparing kubelet prerequisites..."
@@ -295,7 +299,8 @@ echo "Starting kubelet..."
 # Ensure all necessary files exist
 cp $HOME/.kube/config $KUBELET_DIR/kubeconfig
 
-sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
+if command -v sudo >/dev/null 2>&1; then
+  sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
     --kubeconfig=$KUBELET_DIR/kubeconfig \
     --config=$KUBELET_DIR/config.yaml \
     --root-dir=$KUBELET_DIR \
@@ -308,7 +313,23 @@ sudo -E bash -c "$KUBEBUILDER_DIR/bin/kubelet \
     --max-pods=4  \
     --v=2 \
     --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig \
-    & echo \$! > /tmp/kubelet.pid"
+    >> $LOG_DIR/kubelet.log 2>&1 & echo \$! > /tmp/kubelet.pid"
+else
+  $KUBEBUILDER_DIR/bin/kubelet \
+    --kubeconfig=$KUBELET_DIR/kubeconfig \
+    --config=$KUBELET_DIR/config.yaml \
+    --root-dir=$KUBELET_DIR \
+    --cert-dir=$KUBELET_DIR/pki \
+    --hostname-override=$(hostname) \
+    --pod-infra-container-image=registry.k8s.io/pause:3.10 \
+    --node-ip=$HOST_IP \
+    --cloud-provider=external \
+    --cgroup-driver=cgroupfs \
+    --max-pods=4  \
+    --v=2 \
+    --bootstrap-kubeconfig=$KUBELET_DIR/kubeconfig \
+    >> $LOG_DIR/kubelet.log 2>&1 & echo $! > /tmp/kubelet.pid
+fi
 
 echo "Waiting for kubelet to register..."
 sleep 5
@@ -343,7 +364,7 @@ PATH=$PATH:/opt/cni/bin:/usr/sbin $KUBEBUILDER_DIR/bin/kube-controller-manager \
     --use-service-account-credentials=true \
     --cluster-signing-cert-file=/tmp/ca.crt \
     --cluster-signing-key-file=/tmp/ca.key \
-    --v=2 &
+    --v=2 >> $LOG_DIR/kube-controller-manager.log 2>&1 &
 echo $! > /tmp/controller-manager.pid
 
 echo "=== Setup Complete ==="
